@@ -1,25 +1,27 @@
 /*
  * IOT Doorbell Creates Pushbullet push when someone rings the bell.
- * Based very much on code found here: http://www.esp8266.com/viewtopic.php?f=29&t=7116
- * 
  */
 
 #include <ESP8266WiFi.h>
-#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
+
 
 #define WIFI_SSID "changeme"
 #define WIFI_PASS "changeme"
 
-#define PUSHBULLET_TOKEN "changeme"
+#define PUSHBULLET_TOKEN "changeme" //Preferably use a sacrificial account because the recipient is not verified.
 
-const char* host = "api.pushbullet.com";
+const char* host = "https://api.pushbullet.com/v2/pushes";
 const int httpsPort = 443;
 
-// Use web browser to view and copy
-// SHA1 fingerprint of the certificate
-const char* fingerprint = "2C BC 06 10 0A E0 6E B0 9E 60 E5 96 BA 72 C5 63 93 23 54 B3"; //got it using https://www.grc.com/fingerprints.htm
+std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+HTTPClient https;
 
 void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN,HIGH);
+  pinMode(D1, INPUT_PULLUP);
   Serial.begin(115200);
   Serial.println();
   Serial.print("connecting to ");
@@ -27,9 +29,11 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN, LOW);
     delay(500);
     Serial.print(".");
   }
+  digitalWrite(LED_BUILTIN,HIGH);
   Serial.println("");
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
@@ -38,51 +42,78 @@ void setup() {
   push(messagebody);
 }
 
-void push(const String& messagebody){
-  WiFiClientSecure client;
-  Serial.print("connecting to ");
-  Serial.println(host);
-  while (!client.connect(host, httpsPort)) {
-    Serial.println("connection failed");
-  }
-
-  if (client.verify(fingerprint, host)) {
-    Serial.println("certificate matches");
+bool push(const String& messagebody){
+  //------------------------------------------------------------------------------------
+  //Pushbullet fingerprint changes too often to hardcode it and verifying a chain is beyond my capabilities.
+  //Note, that this might allow someone pretending to be pushbullet to intercept your messages.
+  client->setInsecure();
+  //------------------------------------------------------------------------------------
+  Serial.println("HTTPS BEGIN");
+  digitalWrite(LED_BUILTIN, LOW);
+  if(https.begin(*client, host)){
+    Serial.println("POST");
+    https.addHeader("Content-Type", "application/json",false, true);
+    https.addHeader("Access-Token", PUSHBULLET_TOKEN, false, true);
+    int httpCode = https.POST(messagebody);
+    if(httpCode > 0){
+      digitalWrite(LED_BUILTIN,HIGH);
+      Serial.println("POST SUCCESS");
+    } else {
+      Serial.println("POST FAILURE");
+      digitalWrite(LED_BUILTIN, LOW);
+      return false;
+    }
   } else {
-    Serial.println("certificate doesn't match");
+    digitalWrite(LED_BUILTIN,LOW);
+    Serial.println("HTTPS connection failed");
+    return false;
   }
-  String url = "/v2/pushes";
-  Serial.print("requesting URL: ");
-  Serial.println(url);
+  return true;
+}
 
-  client.print(String("POST ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
-               "Authorization: Bearer " + PUSHBULLET_TOKEN + "\r\n" +
-               "Content-Type: application/json\r\n" +
-               "Content-Length: " +
-               String(messagebody.length()) + "\r\n\r\n");
-  client.print(messagebody);
+long lastUpdate = 0;
 
+int clientNum = 0;
 
+bool lastTurnPressed = false;
 
-  Serial.println("request sent");
-
-  //print the response
-
-  while (client.available() == 0);
-
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    Serial.println(line);
+bool isRinging(){
+  for(int i=0; i<5;++i){
+    if(digitalRead(D1) == LOW){
+      return true;  
+    }
+    delay(5);
   }
+  return false;
 }
 
 void loop() {
-  if(digitalRead(2) == LOW){
-    Serial.println("Someone rang! Pushing bullet!");
-    String messagebody = "{\"type\": \"note\", \"title\": \"Doorbell\", \"body\": \"Someone rang!\"}\r\n";
-    push(messagebody);
-    while(digitalRead(2) == LOW);
+  if(clientNum > 0){
+    String messagebody;
+    //Modify as needed to notify multiple people
+    switch(clientNum){
+      case 1:
+        messagebody = "{\"type\": \"note\", \"title\": \"Doorbell\", \"body\": \"Someone rang!\"}\r\n";
+      break;
+    }
+    if(push(messagebody)){
+      clientNum--;
+    }
+  } else {
+    long curr = millis();
+    if(curr - lastUpdate > 10){
+      lastUpdate = curr;
+      if(lastTurnPressed){
+        if(!isRinging()){
+          lastTurnPressed = false;
+        }
+      } else {
+        if(isRinging()) {
+          lastTurnPressed = true;
+          clientNum = 1;
+          Serial.println("Doorbell rang");
+        }
+      }
+    }
   }
-  delay(100);
 }
